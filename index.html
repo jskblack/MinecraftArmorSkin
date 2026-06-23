@@ -11,6 +11,14 @@
         無外部連線、無上傳、無廣告。
 --------------------------------------------------------------------------------
   Changelog
+    v1.3  (2026-06-23)
+      - 修正高解析度螢幕 (devicePixelRatio > 1) 下角色過大、偏離畫面中心，
+        以及「重設視角」後角色變超大的問題 (renderer.setSize 改為同步更新
+        canvas 的 CSS 顯示尺寸)
+    v1.2  (2026-06-23)
+      - 右下角新增三軸方向器 (X紅 / Y綠 / Z藍)，隨視角轉動
+      - 新增「分開姿勢」按鈕，手腳張開避免雙腿中間重疊、方便繪製內側
+      - 預設鏡頭略拉近，全身比例貼近參考截圖 (標準麥塊比例：頭8/身12/手12/腿12)
     v1.1  (2026-06-23)
       - 新增 3D 地面格與中心白色十字 (角色中心定位)
       - 工具列新增「隱藏人物」與「顯示範圍：全部 / 只上半身 / 只下半身」
@@ -30,7 +38,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>裝備穿著材質編輯器 v1.1</title>
+<title>裝備穿著材質編輯器 v1.3</title>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; font-family: "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", system-ui, sans-serif; }
@@ -108,6 +116,7 @@
     <button class="btn" id="btnZoomOut" title="縮小">－</button>
     <button class="btn" id="btnZoomIn" title="放大">＋</button>
     <button class="btn" id="btnPlay" title="播放走路動畫">播放</button>
+    <button class="btn" id="btnPose" title="分開姿勢，方便繪製手腳內側">分開姿勢</button>
     <span class="divider"></span>
     <label class="lbl">選擇部位</label>
     <select class="btn" id="selectPart">
@@ -435,7 +444,8 @@
     undoStack: [],
     redoStack: [],
     playing: false,
-    cam: { az: 0, pol: 78, dist: 48, target: new THREE.Vector3(0, 16, 0) }
+    posed: false,
+    cam: { az: 0, pol: 78, dist: 44, target: new THREE.Vector3(0, 16, 0) }
   };
 
   App.init = function () {
@@ -545,6 +555,20 @@
     gcGeo.setAttribute("position", new THREE.Float32BufferAttribute(gcPts, 3));
     scene.add(new THREE.LineSegments(gcGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 })));
 
+    // 右下角三軸方向器 (X紅 / Y綠 / Z藍)
+    var gizmoScene = new THREE.Scene();
+    var gizmoCam = new THREE.PerspectiveCamera(50, 1, 0.1, 10);
+    gizmoScene.add(new THREE.AxesHelper(1));
+    function gizTip(color, p) {
+      var m = new THREE.Mesh(new THREE.SphereGeometry(0.14, 12, 12), new THREE.MeshBasicMaterial({ color: color }));
+      m.position.set(p[0], p[1], p[2]); gizmoScene.add(m);
+    }
+    gizTip(0xff4d4d, [1, 0, 0]); gizTip(0x4dff4d, [0, 1, 0]); gizTip(0x4d8dff, [0, 0, 1]);
+    var lx = makeTextSprite("X", "#ff5b5b"); lx.position.set(1.4, 0, 0); gizmoScene.add(lx);
+    var ly = makeTextSprite("Y", "#5bff5b"); ly.position.set(0, 1.4, 0); gizmoScene.add(ly);
+    var lz = makeTextSprite("Z", "#5b9dff"); lz.position.set(0, 0, 1.4); gizmoScene.add(lz);
+    this.gizmo = { scene: gizmoScene, cam: gizmoCam };
+
     this.raycaster = new THREE.Raycaster();
     this.bindUI();
     this.bindPointer();
@@ -555,6 +579,7 @@
     document.addEventListener("webkitfullscreenchange", function () { setTimeout(function () { self.resize(); }, 60); });
 
     var clock = new THREE.Clock();
+    var _sz = new THREE.Vector2(), _dir = new THREE.Vector3();
     (function loop() {
       requestAnimationFrame(loop);
       var t = clock.getElapsedTime();
@@ -567,7 +592,25 @@
       } else {
         ["rightArm", "leftArm", "rightLeg", "leftLeg"].forEach(function (k) { self.partGroups[k].rotation.x = 0; });
       }
+      renderer.autoClear = true;
       renderer.render(scene, camera);
+
+      // 右下角軸向器
+      var gs = 96;
+      renderer.getSize(_sz);
+      camera.getWorldDirection(_dir);
+      self.gizmo.cam.position.copy(_dir).multiplyScalar(-3.2);
+      self.gizmo.cam.up.copy(camera.up);
+      self.gizmo.cam.lookAt(0, 0, 0);
+      renderer.autoClear = false;
+      renderer.setViewport(_sz.x - gs, 0, gs, gs);
+      renderer.setScissor(_sz.x - gs, 0, gs, gs);
+      renderer.setScissorTest(true);
+      renderer.clearDepth();
+      renderer.render(self.gizmo.scene, self.gizmo.cam);
+      renderer.setScissorTest(false);
+      renderer.setViewport(0, 0, _sz.x, _sz.y);
+      renderer.autoClear = true;
     })();
 
     this.renderFlat();
@@ -578,7 +621,7 @@
     var c = document.getElementById("view");
     var w = c.clientWidth, h = c.clientHeight;
     if (w === 0 || h === 0) return;
-    this.renderer.setSize(w, h, false);
+    this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   };
@@ -722,6 +765,18 @@
     var allBtn = document.getElementById("pwAll");
     if (allBtn) allBtn.classList.toggle("active", part === "all");
     this.refreshGrids();
+  };
+
+  // 分開姿勢：手腳張開，方便繪製內側 (避免雙腿中間重疊)
+  App.applyPose = function (on) {
+    this.posed = on;
+    var lz = on ? 0.22 : 0, az = on ? 0.55 : 0;
+    this.partGroups.rightLeg.rotation.z = -lz;
+    this.partGroups.leftLeg.rotation.z = lz;
+    this.partGroups.rightArm.rotation.z = -az;
+    this.partGroups.leftArm.rotation.z = az;
+    var b = document.getElementById("btnPose");
+    if (b) b.classList.toggle("active", on);
   };
 
   // 單一像素層級的工具 (鉛筆 / 橡皮擦 / 取色 / 油漆桶) — 3D 與平面共用
@@ -966,7 +1021,7 @@
     document.getElementById("btnUndo").addEventListener("click", function () { self.undo(); });
     document.getElementById("btnRedo").addEventListener("click", function () { self.redo(); });
     document.getElementById("btnReset").addEventListener("click", function () {
-      self.cam = { az: 0, pol: 78, dist: 48, target: new THREE.Vector3(0, 16, 0) }; self.updateCamera();
+      self.cam = { az: 0, pol: 78, dist: 44, target: new THREE.Vector3(0, 16, 0) }; self.updateCamera();
     });
     document.getElementById("btnZoomIn").addEventListener("click", function () { self.cam.dist = Math.max(20, self.cam.dist - 4); self.updateCamera(); });
     document.getElementById("btnZoomOut").addEventListener("click", function () { self.cam.dist = Math.min(120, self.cam.dist + 4); self.updateCamera(); });
@@ -974,6 +1029,7 @@
       self.playing = !self.playing;
       this.classList.toggle("active", self.playing);
     });
+    document.getElementById("btnPose").addEventListener("click", function () { self.applyPose(!self.posed); });
     document.getElementById("btnFull").addEventListener("click", function () {
       var el = document.getElementById("app");
       if (!document.fullscreenElement) { (el.requestFullscreen || el.webkitRequestFullscreen).call(el); }
@@ -1022,6 +1078,18 @@
   };
 
   // ===== 小工具 =====
+  function makeTextSprite(text, hexColor) {
+    var c = document.createElement("canvas"); c.width = 64; c.height = 64;
+    var x = c.getContext("2d");
+    x.fillStyle = hexColor; x.font = "bold 46px sans-serif";
+    x.textAlign = "center"; x.textBaseline = "middle";
+    x.fillText(text, 32, 35);
+    var tex = new THREE.CanvasTexture(c);
+    var sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+    sp.scale.set(0.55, 0.55, 0.55);
+    return sp;
+  }
+
   function hexToRgb(hex) {
     hex = hex.replace("#", "");
     return [parseInt(hex.substr(0, 2), 16), parseInt(hex.substr(2, 2), 16), parseInt(hex.substr(4, 2), 16)];
